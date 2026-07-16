@@ -1,127 +1,121 @@
 package com.example.MapCalculator;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jgrapht.Graph;
 import org.jgrapht.GraphPath;
 import org.jgrapht.alg.shortestpath.DijkstraShortestPath;
-import org.jgrapht.alg.util.Pair;
 import org.jgrapht.graph.DefaultEdge;
 import org.jgrapht.graph.DefaultUndirectedGraph;
-import org.json.simple.JSONArray;
-import org.json.simple.JSONObject;
-import org.json.simple.parser.JSONParser;
-import org.json.simple.parser.ParseException;
-import org.springframework.http.HttpStatus;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
-import org.springframework.web.server.ResponseStatusException;
 
-import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.Optional;
 
 @Service
-
 public class MapService {
 
-    Map<String,Country> countryMap;
-    DijkstraShortestPath<Country,DefaultEdge> dijkstraShortestPath;
-    List<String> getRoute(String origin, String destination) throws IOException, ParseException {
+    private static final String COUNTRIES_RESOURCE = "static/countries.json";
 
-        List<Country> country = new ArrayList<>();
+    private final Map<String, Country> countriesByCode;
 
-        //JSON parser object to parse read file
-        JSONParser jsonParser = new JSONParser();
-
-        try (FileReader reader = new FileReader("src/main/resources/static/countries.json")) {
-            //Read JSON file
-            Object obj = jsonParser.parse(reader);
-
-            JSONArray countryList = (JSONArray) obj;
-            System.out.println(countryList);
-
-            countryList.forEach(countryJSON -> country.add(parseCountryObject((JSONObject) countryJSON)));
-        }
-
-        Country originCountry = country.stream().filter(item -> item.getName().toLowerCase().equals(origin.toLowerCase())).findAny().orElse(new Country());
-        Country destinationCountry = country.stream().filter(item -> item.getName().toLowerCase().equals(destination.toLowerCase())).findAny().orElse(new Country());
-
-        if (!country.contains(originCountry) || !country.contains(destinationCountry) || origin.toLowerCase().equals(destination.toLowerCase()) ){
-
-            return new ArrayList<String>();
-
-        }
-
-         createGraph(country);
-
-        final GraphPath<Country, DefaultEdge> path = dijkstraShortestPath.getPath(originCountry, destinationCountry);
-
-        if(path==null){
-
-            return new ArrayList<String>();
-
-        }
-
-        List<String> result = new ArrayList<String>();
-
-                path.getVertexList().stream().forEach(item->result.add(item.getName()));
-
-        return result;
-
+    public MapService(ObjectMapper objectMapper) {
+        this.countriesByCode = loadCountries(objectMapper);
     }
 
-    private void createGraph(List<Country> countryList){
+    public Optional<List<String>> findRoute(String origin, String destination) {
+        String originCode = normalizeCode(origin);
+        String destinationCode = normalizeCode(destination);
 
-        countryMap = countryList.stream().collect(Collectors.toMap(Country::getName,item->item));
-
-        final Graph<Country, DefaultEdge> graph = new DefaultUndirectedGraph<>(DefaultEdge.class);
-
-        try {
-            countryMap.values().forEach(graph::addVertex);
-            countryMap.values().stream()
-                    .map(this::getEdges)
-                    .flatMap(Collection::stream)
-                    .forEach(edge -> graph.addEdge(edge.getFirst(), edge.getSecond()));
-        } catch (NullPointerException | IllegalArgumentException e) {
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "unable to construct a graph from countries", e);
+        if (originCode.isBlank() || destinationCode.isBlank() || originCode.equals(destinationCode)) {
+            return Optional.empty();
         }
 
-        dijkstraShortestPath = new DijkstraShortestPath<>(graph);
+        Country originCountry = countriesByCode.get(originCode);
+        Country destinationCountry = countriesByCode.get(destinationCode);
 
-
-    }
-    private List<Pair<Country, Country>> getEdges(final Country country) {
-        return country.getBorders().stream()
-                .map(countryMap::get)
-                .map(neighbour -> new Pair<>(country, neighbour))
-                .collect(Collectors.toList());
-    }
-
-
-    private Country parseCountryObject(JSONObject countryJSON) {
-
-        {
-            Country country = new Country();
-
-            country.setName((String) (countryJSON.get("cca3")));
-
-            JSONArray borderJSON = (JSONArray) countryJSON.get("borders");
-
-            List<String> borders = new ArrayList<String>();
-
-            borderJSON.forEach(border -> {
-
-                borders.add((String) border);
-
-            });
-
-            country.setBorders(borders);
-
-            return country;
+        if (originCountry == null || destinationCountry == null) {
+            return Optional.empty();
         }
 
+        Graph<Country, DefaultEdge> graph = createGraph();
+        GraphPath<Country, DefaultEdge> path =
+                new DijkstraShortestPath<>(graph).getPath(originCountry, destinationCountry);
+
+        if (path == null) {
+            return Optional.empty();
+        }
+
+        return Optional.of(path.getVertexList().stream()
+                .map(Country::getName)
+                .toList());
     }
 
+    private Graph<Country, DefaultEdge> createGraph() {
+        Graph<Country, DefaultEdge> graph = new DefaultUndirectedGraph<>(DefaultEdge.class);
+        countriesByCode.values().forEach(graph::addVertex);
+
+        for (Country country : countriesByCode.values()) {
+            for (String borderCode : country.getBorders()) {
+                Country neighbour = countriesByCode.get(normalizeCode(borderCode));
+
+                if (neighbour != null
+                        && neighbour != country
+                        && !graph.containsEdge(country, neighbour)) {
+                    graph.addEdge(country, neighbour);
+                }
+            }
+        }
+
+        return graph;
+    }
+
+    private Map<String, Country> loadCountries(ObjectMapper objectMapper) {
+        ClassPathResource resource = new ClassPathResource(COUNTRIES_RESOURCE);
+
+        try (InputStream inputStream = resource.getInputStream()) {
+            JsonNode root = objectMapper.readTree(inputStream);
+
+            if (!root.isArray()) {
+                throw new IllegalStateException("Countries resource must contain a JSON array.");
+            }
+
+            Map<String, Country> countries = new LinkedHashMap<>();
+
+            for (JsonNode countryNode : root) {
+                String code = normalizeCode(countryNode.path("cca3").asText());
+                if (code.isBlank()) {
+                    continue;
+                }
+
+                Country country = new Country();
+                country.setName(code);
+
+                List<String> borders = new ArrayList<>();
+                JsonNode bordersNode = countryNode.path("borders");
+                if (bordersNode.isArray()) {
+                    bordersNode.forEach(border -> borders.add(normalizeCode(border.asText())));
+                }
+
+                country.setBorders(borders);
+                countries.put(code, country);
+            }
+
+            return Collections.unmodifiableMap(countries);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Unable to load country routing data.", exception);
+        }
+    }
+
+    private String normalizeCode(String code) {
+        return code == null ? "" : code.trim().toUpperCase(Locale.ROOT);
+    }
 }
