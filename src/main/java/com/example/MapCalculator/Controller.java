@@ -1,37 +1,32 @@
 package com.example.MapCalculator;
 
-import org.json.simple.parser.ParseException;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import java.io.IOException;
-import java.util.List;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
-@RequestMapping(value = "/routing")
 @RestController
+@RequestMapping("/routing")
 public class Controller {
 
-@Autowired
-MapService mapService;
+    private final MapService mapService;
 
-@GetMapping (value= "{origin}/{destination}")
-public ResponseEntity getRoute(@PathVariable String origin, @PathVariable String destination) throws IOException, ParseException
-{
-  List<String> response = mapService.getRoute(origin,destination);
+    public Controller(MapService mapService) {
+        this.mapService = mapService;
+    }
 
-  if (response.isEmpty()){
+    @GetMapping("/{origin}/{destination}")
+    public ResponseEntity<Route> getRoute(
+            @PathVariable String origin,
+            @PathVariable String destination) {
 
-    return new ResponseEntity(HttpStatus.BAD_REQUEST);
-  }
-
-  Route route = new Route();
-
-  route.setRoute(response);
-
-  return new ResponseEntity(route, HttpStatus.OK);
+        return mapService.findRoute(origin, destination)
+                .map(routeItems -> {
+                    Route route = new Route();
+                    route.setRoute(routeItems);
+                    return ResponseEntity.ok(route);
+                })
+                .orElseGet(() -> ResponseEntity.badRequest().build());
+    }
 }
-
-
-}
-
